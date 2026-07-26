@@ -1,4 +1,5 @@
 #include "FreeRTOS.h"
+#include "adc.h"
 #include "bno055_wrapper/bno055_wrapper.h"
 #include "cmsis_os.h"
 #include "read_adc/read_adc.h"

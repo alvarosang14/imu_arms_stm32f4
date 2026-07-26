@@ -2,9 +2,11 @@
 
 #include "adc.h"
 #include "bno055_wrapper/bno055_wrapper.h"
+#include "dma.h"
 #include "free_rtos/free_rtos.h"
 #include "gpio.h"
 #include "i2c.h"
+#include "read_adc/read_adc.h"
 #include "usb_device.h"
 #include "utils/utils.h"
 
@@ -27,12 +29,15 @@ static void init_stm32() {
     SystemClock_Config();
 
     /* Initialize all configured peripherals */
+    MX_DMA_Init();
     MX_GPIO_Init();
     MX_ADC1_Init();
     MX_I2C1_Init();
     MX_USB_DEVICE_Init();
 
     bno055_init_a();
+    adc_init();
+
     freertos_init();
 }
 
