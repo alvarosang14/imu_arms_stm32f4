@@ -2,12 +2,19 @@
 #include "adc.h"
 #include "bno055_wrapper/bno055_wrapper.h"
 #include "cmsis_os.h"
+#include "cmsis_os2.h"
 #include "read_adc/read_adc.h"
 #include "send_info/send_info.h"
 #include "task.h"
 
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
+
+#define N_DMA_CH 1U
+#define I_DMA_CH 0U
+
+osSemaphoreId_t adc_sem;
 
 /* Definitions for readADC */
 osThreadId_t readADCHandle;
@@ -40,7 +47,7 @@ const osThreadAttr_t pushSerial_attributes = {
 
 // ============ Struct ============
 struct message {
-    uint32_t adc_value;
+    uint16_t adc_value[4];
     struct bno055_accel_t accel_out;
     struct bno055_gyro_t gyro_out;
     struct bno055_euler_t euler;
@@ -50,9 +57,9 @@ struct message msg_raw;
 
 static void StartReadADC(void *argument) {
     // PA1
-
+    adc_init();
     for (;;) {
-        msg_raw.adc_value = read_data_adc();
+        memcpy(msg_raw.adc_value, ADC_VAL, sizeof(ADC_VAL));
         osDelay(100);
     }
 }
@@ -66,7 +73,8 @@ static void StartReadI2C1(void *argument) {
         err = bno055_read(&msg_raw.accel_out, &msg_raw.gyro_out);
         err2 = bno055_read_euler(&msg_raw.euler);
         if (err != BNO055_SUCCESS || err2 != BNO055_SUCCESS) {
-            break;
+            send_info("Error in I2C1");
+            osThreadExit();
         }
         osDelay(50);
     }
@@ -84,18 +92,19 @@ static void StartPushSerial(void *argument) {
     char msg[128];
     for (;;) {
         snprintf(msg, sizeof(msg),
-                 "{\"adc\":%lu,"
+                 "{\"adc\":%lu,%lu,%lu,%lu"
                  "\"euler\":{\"h\":%d, \"p\":%d, \"r\":%d},"
                  "\"accel\":{\"x\":%d,\"y\":%d,\"z\":%d},"
                  "\"gyro\":{\"x\":%d,\"y\":%d,\"z\":%d}}\r\n",
-                 msg_raw.adc_value, msg_raw.euler.h, msg_raw.euler.p,
-                 msg_raw.euler.r, msg_raw.accel_out.x, msg_raw.accel_out.y,
-                 msg_raw.accel_out.z, msg_raw.gyro_out.x, msg_raw.gyro_out.y,
-                 msg_raw.gyro_out.z);
+                 msg_raw.adc_value[0], msg_raw.adc_value[1],
+                 msg_raw.adc_value[2], msg_raw.adc_value[3], msg_raw.euler.h,
+                 msg_raw.euler.p, msg_raw.euler.r, msg_raw.accel_out.x,
+                 msg_raw.accel_out.y, msg_raw.accel_out.z, msg_raw.gyro_out.x,
+                 msg_raw.gyro_out.y, msg_raw.gyro_out.z);
 
         send_info(msg);
 
-        osDelay(200);
+        osDelay(1000);
     }
 }
 
@@ -122,13 +131,16 @@ static void thread_create(void) {
  */
 void freertos_init(void) {
     /* add mutexes, ... */
-    /* add semaphores, ... */
+
     /* start timers, add new ones, ... */
     /* add queues, ... */
 
     /* Init scheduler */
     osKernelInitialize(); /* Call init function for freertos objects (in
                              cmsis_os2.c) */
+
+    /* add semaphores, ... */
+    // adc_sem = osSemaphoreNew(N_DMA_CH, I_DMA_CH, NULL);
 
     /* Init thread */
     thread_create();

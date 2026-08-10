@@ -1,8 +1,8 @@
-#include "adc.h"
-
 #include "read_adc/read_adc.h"
+#include "adc.h"
+#include <stdint.h>
 
-uint32_t ADC_VAL;
+uint16_t ADC_VAL[4];
 
 // using normal read
 uint32_t read_data_adc() {
@@ -14,13 +14,6 @@ uint32_t read_data_adc() {
     return adc_value;
 }
 
-void adc_init() { HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ADC_VAL, 1); }
+void adc_init() { HAL_ADC_Start_DMA(&hadc1, (uint32_t *)ADC_VAL, 4); }
 
-// using dma
-uint32_t read_data_adc_nvic() { return ADC_VAL; }
-
-void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {
-    if (hadc->Instance == ADC1) {
-        // todo poner semaforo en true
-    }
-}
+void HAL_ADC_ConvCpltCallback(ADC_HandleTypeDef *hadc) {}
