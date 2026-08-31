@@ -1,8 +1,9 @@
 #include "bno055_wrapper/bno055_wrapper.h"
 #include "BNO055/bno055.h"
+#include "cmsis_os.h"
 #include "i2c.h"
 
-#define BNO055_I2C_TIMEOUT_MS 100
+#define BNO055_I2C_TIMEOUT_MS 1000
 
 /*----------------------------------------------------------------------------*
  *  struct bno055_t parameters can be accessed by using BNO055
@@ -17,23 +18,96 @@
 static struct bno055_t bno055;
 static u8 power_mode = BNO055_INIT_VALUE;
 
-static s8 BNO055_I2C_bus_write(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
-    HAL_StatusTypeDef status = HAL_I2C_Mem_Write(
-        &hi2c1, (uint16_t)(dev_addr << 1), reg_addr, I2C_MEMADD_SIZE_8BIT,
-        reg_data, len, BNO055_I2C_TIMEOUT_MS);
+/*----------------------------------------------------------------------------*
+ *  Sincronizacion I2C1 en DMA.
+ *  El driver de Bosch espera que bus_read/bus_write vuelvan con los datos ya
+ *  transferidos, asi que lanzamos el DMA y dormimos la task hasta que el
+ *  callback suelte el semaforo.
+ *---------------------------------------------------------------------------*/
+static osSemaphoreId_t i2c_done = NULL;
+static volatile HAL_StatusTypeDef i2c_result = HAL_OK;
+static volatile uint32_t last_i2c_error = 0;
 
-    return (status == HAL_OK) ? BNO055_SUCCESS : BNO055_ERROR;
+uint32_t bno055_last_i2c_error(void) { return last_i2c_error; }
+
+static s8 BNO055_I2C_bus_write(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
+    while (osSemaphoreAcquire(i2c_done, 0) == osOK) {
+    }
+    i2c_result = HAL_BUSY;
+
+    if (HAL_I2C_Mem_Write_DMA(&hi2c1, (uint16_t)(dev_addr << 1), reg_addr,
+                              I2C_MEMADD_SIZE_8BIT, reg_data, len) != HAL_OK) {
+        return BNO055_ERROR;
+    }
+
+    if (osSemaphoreAcquire(i2c_done, BNO055_I2C_TIMEOUT_MS) != osOK) {
+        last_i2c_error = 0xFFFFFFFFU;
+        HAL_I2C_Master_Abort_IT(&hi2c1, (uint16_t)(dev_addr << 1));
+        osSemaphoreAcquire(i2c_done, 5);
+        return BNO055_ERROR;
+    }
+
+    return (i2c_result == HAL_OK) ? BNO055_SUCCESS : BNO055_ERROR;
 }
 
 static s8 BNO055_I2C_bus_read(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
-    HAL_StatusTypeDef status = HAL_I2C_Mem_Read(
-        &hi2c1, (uint16_t)(dev_addr << 1), reg_addr, I2C_MEMADD_SIZE_8BIT,
-        reg_data, len, BNO055_I2C_TIMEOUT_MS);
+    while (osSemaphoreAcquire(i2c_done, 0) == osOK) {
+    }
+    i2c_result = HAL_BUSY;
 
-    return (status == HAL_OK) ? BNO055_SUCCESS : BNO055_ERROR;
+    if (HAL_I2C_Mem_Read_DMA(&hi2c1, (uint16_t)(dev_addr << 1), reg_addr,
+                             I2C_MEMADD_SIZE_8BIT, reg_data, len) != HAL_OK) {
+        return BNO055_ERROR;
+    }
+
+    if (osSemaphoreAcquire(i2c_done, BNO055_I2C_TIMEOUT_MS) != osOK) {
+        last_i2c_error = 0xFFFFFFFFU;
+        HAL_I2C_Master_Abort_IT(&hi2c1, (uint16_t)(dev_addr << 1));
+        osSemaphoreAcquire(i2c_done, 5);
+        return BNO055_ERROR;
+    }
+
+    return (i2c_result == HAL_OK) ? BNO055_SUCCESS : BNO055_ERROR;
 }
 
-static void BNO055_delay_msec(u32 msec) { HAL_Delay(msec); }
+/* osDelay en lugar de HAL_Delay: HAL_Delay es busy-wait y no cede la CPU.
+ * El init del BNO055 mete esperas de 30-650 ms segun el modo. */
+static void BNO055_delay_msec(u32 msec) { osDelay(msec); }
+
+/*----------------------------------------------------------------------------*
+ *  Callbacks HAL. Se ejecutan en contexto de ISR (I2C1_EV / I2C1_ER / DMA1).
+ *  osSemaphoreRelease detecta el IPSR y llama sola a la variante FromISR,
+ *  por eso esas IRQ deben estar en prioridad NVIC >= 5.
+ *---------------------------------------------------------------------------*/
+void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        i2c_result = HAL_OK;
+        osSemaphoreRelease(i2c_done);
+    }
+}
+
+void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        i2c_result = HAL_OK;
+        osSemaphoreRelease(i2c_done);
+    }
+}
+
+void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        i2c_result = HAL_ERROR;
+        last_i2c_error = hi2c->ErrorCode;
+        osSemaphoreRelease(i2c_done);
+    }
+}
+
+void HAL_I2C_AbortCpltCallback(I2C_HandleTypeDef *hi2c) {
+    if (hi2c->Instance == I2C1) {
+        i2c_result = HAL_ERROR;
+        last_i2c_error = hi2c->ErrorCode;
+        osSemaphoreRelease(i2c_done);
+    }
+}
 
 static struct bno055_accel_t accel_init;
 static struct bno055_gyro_t gyro_init;
@@ -49,12 +123,26 @@ static s32 bno055_read_raw(struct bno055_accel_t *accel_out,
 }
 
 void struct_init(void) {
-    bno055_read_raw(&accel_init, &gyro_init);
-    bno055_read_euler_hrp(&euler_init); // raw también, sin restar
+    if (bno055_read_raw(&accel_init, &gyro_init) != BNO055_SUCCESS) {
+        accel_init.x = accel_init.y = accel_init.z = 0;
+        gyro_init.x = gyro_init.y = gyro_init.z = 0;
+    }
+
+    if (bno055_read_euler_hrp(&euler_init) != BNO055_SUCCESS) {
+        euler_init.h = euler_init.p = euler_init.r = 0;
+    }
 }
 
 s32 bno055_init_a(void) {
     s32 comres = BNO055_ERROR;
+
+    // Antes de cualquier acceso al bus: bno055_init() ya hace lecturas
+    if (i2c_done == NULL) {
+        i2c_done = osSemaphoreNew(1, 0, NULL);
+        if (i2c_done == NULL) {
+            return BNO055_ERROR;
+        }
+    }
 
     bno055.bus_write = BNO055_I2C_bus_write;
     bno055.bus_read = BNO055_I2C_bus_read;
@@ -113,6 +201,7 @@ s32 bno055_convert_double(struct bno055_accel_double_t *accel_out,
 
     return comres;
 }
+
 BNO055_RETURN_FUNCTION_TYPE bno055_read_euler(struct bno055_euler_t *euler) {
     BNO055_RETURN_FUNCTION_TYPE comres = BNO055_SUCCESS;
     comres += bno055_read_euler_hrp(euler);

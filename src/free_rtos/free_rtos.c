@@ -67,14 +67,22 @@ static void StartReadADC(void *argument) {
 static void StartReadI2C1(void *argument) {
     // SDA=azul=PB7 SCL=amarillo=PB6
 
+    while (bno055_init_a() != BNO055_SUCCESS) {
+        send_info("Error init BNO055");
+        osDelay(500);
+    }
+    struct_init();
     s32 err;
     s8 err2;
     for (;;) {
         err = bno055_read(&msg_raw.accel_out, &msg_raw.gyro_out);
-        err2 = bno055_read_euler(&msg_raw.euler);
-        if (err != BNO055_SUCCESS || err2 != BNO055_SUCCESS) {
-            send_info("Error in I2C1");
-            osThreadExit();
+        // err2 = bno055_read_euler(&msg_raw.euler);
+        if (err != BNO055_SUCCESS) {
+            char err_msg[48];
+            snprintf(err_msg, sizeof(err_msg), "Error in I2C1: 0x%08lX\r\n",
+                     (unsigned long)bno055_last_i2c_error());
+            send_info(err_msg);
+            // osThreadExit();
         }
         osDelay(50);
     }

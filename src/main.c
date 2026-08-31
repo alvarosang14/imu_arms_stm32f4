@@ -1,7 +1,6 @@
 #include "main.h"
 
 #include "adc.h"
-#include "bno055_wrapper/bno055_wrapper.h"
 #include "dma.h"
 #include "free_rtos/free_rtos.h"
 #include "gpio.h"
@@ -34,12 +33,8 @@ static void init_stm32() {
     MX_I2C1_Init();
     MX_USB_DEVICE_Init();
 
-    bno055_init_a();
-
     freertos_init();
 }
-
-static void stop_stm32() { bno055_stop(); }
 
 int main(void) {
     init_stm32();
@@ -49,5 +44,4 @@ int main(void) {
     while (loop) {
         sleep(500);
     }
-    stop_stm32();
 }
