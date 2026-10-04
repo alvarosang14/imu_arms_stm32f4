@@ -3,8 +3,6 @@
 #include "cmsis_os.h"
 #include "i2c.h"
 
-#define BNO055_I2C_TIMEOUT_MS 1000
-
 /*----------------------------------------------------------------------------*
  *  struct bno055_t parameters can be accessed by using BNO055
  *  BNO055_t having the following parameters
@@ -28,6 +26,18 @@ static osSemaphoreId_t i2c_done = NULL;
 static volatile HAL_StatusTypeDef i2c_result = HAL_OK;
 static volatile uint32_t last_i2c_error = 0;
 
+static struct bno055_accel_t accel_init;
+static struct bno055_gyro_t gyro_init;
+static struct bno055_euler_t euler_init;
+
+static inline float wrap_angle(float diff) {
+    while (diff > 180.0f)
+        diff -= 360.0f;
+    while (diff < -180.0f)
+        diff += 360.0f;
+    return diff;
+}
+
 uint32_t bno055_last_i2c_error(void) { return last_i2c_error; }
 
 static s8 BNO055_I2C_bus_write(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
@@ -40,7 +50,7 @@ static s8 BNO055_I2C_bus_write(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
         return BNO055_ERROR;
     }
 
-    if (osSemaphoreAcquire(i2c_done, BNO055_I2C_TIMEOUT_MS) != osOK) {
+    if (osSemaphoreAcquire(i2c_done, osWaitForever) != osOK) {
         last_i2c_error = 0xFFFFFFFFU;
         HAL_I2C_Master_Abort_IT(&hi2c1, (uint16_t)(dev_addr << 1));
         osSemaphoreAcquire(i2c_done, 5);
@@ -60,7 +70,7 @@ static s8 BNO055_I2C_bus_read(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
         return BNO055_ERROR;
     }
 
-    if (osSemaphoreAcquire(i2c_done, BNO055_I2C_TIMEOUT_MS) != osOK) {
+    if (osSemaphoreAcquire(i2c_done, osWaitForever) != osOK) {
         last_i2c_error = 0xFFFFFFFFU;
         HAL_I2C_Master_Abort_IT(&hi2c1, (uint16_t)(dev_addr << 1));
         osSemaphoreAcquire(i2c_done, 5);
@@ -108,10 +118,6 @@ void HAL_I2C_AbortCpltCallback(I2C_HandleTypeDef *hi2c) {
         osSemaphoreRelease(i2c_done);
     }
 }
-
-static struct bno055_accel_t accel_init;
-static struct bno055_gyro_t gyro_init;
-static struct bno055_euler_t euler_init;
 
 // Lectura cruda, sin restar nada — la usa struct_init() y bno055_read()
 static s32 bno055_read_raw(struct bno055_accel_t *accel_out,
@@ -206,9 +212,9 @@ BNO055_RETURN_FUNCTION_TYPE bno055_read_euler(struct bno055_euler_t *euler) {
     BNO055_RETURN_FUNCTION_TYPE comres = BNO055_SUCCESS;
     comres += bno055_read_euler_hrp(euler);
 
-    euler->h = euler->h - euler_init.h;
+    euler->h = wrap_angle(euler->h - euler_init.h);
+    euler->r = wrap_angle(euler->r - euler_init.r);
     euler->p = euler->p - euler_init.p;
-    euler->r = euler->r - euler_init.r;
 
     return comres;
 }
