@@ -3,8 +3,6 @@ name: Build and Push Docker Image
 on:
   push:
     paths: [Dockerfile]
-  pull_request:
-  workflow_dispatch:
 
 env:
   URL_IMAGE: "ghcr.io/alvarosang14/stm32-compile"
