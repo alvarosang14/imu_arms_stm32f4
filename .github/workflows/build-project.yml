@@ -11,6 +11,10 @@ jobs:
     container: ghcr.io/alvarosang14/stm32-compile:pr-4
     steps:
       - uses: actions/checkout@v6
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+            submodules: recursive
       - name: Build
         run: |
           cmake --preset Release
