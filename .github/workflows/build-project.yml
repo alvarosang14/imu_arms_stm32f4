@@ -8,7 +8,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    container: ghcr.io/alvarosang14/stm32-compile:latest
+    container: ghcr.io/alvarosang14/stm32-compile:pr-4
     steps:
       - uses: actions/checkout@v6
       - name: Build
