@@ -1,7 +1,6 @@
 name: Build firmware
 
 on:
-  push:
   pull_request:
   workflow_dispatch:
 
@@ -18,7 +17,7 @@ jobs:
       - name: Build
         run: |
           cmake --preset Release
-          cmake --build --preset default
+          cmake --build --preset Release
       - uses: actions/upload-artifact@v7
         with:
           name: read_sensors_elf
