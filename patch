@@ -1,0 +1,827 @@
+diff --git a/.vscode/settings.json b/.vscode/settings.json
+index 8dd36e8..243d79d 100644
+--- a/.vscode/settings.json
++++ b/.vscode/settings.json
+@@ -12,5 +12,5 @@
+         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-gcc*",
+         "--query-driver=${env:CUBE_BUNDLE_PATH}/gnu-tools-for-stm32/14.3.1+st.2/bin/arm-none-eabi-g++*"
+     ],
+-    "editor.formatOnSave": true
++    "editor.formatOnSave": false
+ }
+\ No newline at end of file
+diff --git a/STM32F4_READ_USB.ioc b/STM32F4_READ_USB.ioc
+index 7f0c57a..0452cd7 100644
+--- a/STM32F4_READ_USB.ioc
++++ b/STM32F4_READ_USB.ioc
+@@ -58,8 +58,10 @@ Dma.Request1=I2C1_RX
+ Dma.Request2=I2C1_TX
+ Dma.RequestsNb=3
+ FREERTOS.FootprintOK=true
+-FREERTOS.IPParameters=Tasks01,configUSE_NEWLIB_REENTRANT,FootprintOK
++FREERTOS.IPParameters=Tasks01,configUSE_NEWLIB_REENTRANT,FootprintOK,configUSE_MALLOC_FAILED_HOOK,configCHECK_FOR_STACK_OVERFLOW
+ FREERTOS.Tasks01=defaultTask,24,128,StartDefaultTask,As weak,NULL,Dynamic,NULL,NULL
++FREERTOS.configCHECK_FOR_STACK_OVERFLOW=2
++FREERTOS.configUSE_MALLOC_FAILED_HOOK=1
+ FREERTOS.configUSE_NEWLIB_REENTRANT=1
+ File.Version=6
+ GPIO.groupedBy=
+diff --git a/USB_DEVICE/App/usbd_cdc_if.c b/USB_DEVICE/App/usbd_cdc_if.c
+index 95e7bb4..80a3623 100644
+--- a/USB_DEVICE/App/usbd_cdc_if.c
++++ b/USB_DEVICE/App/usbd_cdc_if.c
+@@ -128,6 +128,8 @@ static int8_t CDC_Receive_FS(uint8_t* pbuf, uint32_t *Len);
+ static int8_t CDC_TransmitCplt_FS(uint8_t *pbuf, uint32_t *Len, uint8_t epnum);
+ 
+ /* USER CODE BEGIN PRIVATE_FUNCTIONS_DECLARATION */
++// ===== OWN CODE =====
++void usb_cdc_tx_complete(void);
+ 
+ /* USER CODE END PRIVATE_FUNCTIONS_DECLARATION */
+ 
+@@ -284,6 +286,10 @@ uint8_t CDC_Transmit_FS(uint8_t* Buf, uint16_t Len)
+   /* USER CODE BEGIN 7 */
+     USBD_CDC_HandleTypeDef *hcdc =
+         (USBD_CDC_HandleTypeDef *)hUsbDeviceFS.pClassData;
++    // ===== OWN CODE =====
++    if (hcdc == NULL) {
++        return USBD_FAIL;
++    }
+     if (hcdc->TxState != 0) {
+         return USBD_BUSY;
+     }
+@@ -312,6 +318,8 @@ static int8_t CDC_TransmitCplt_FS(uint8_t *Buf, uint32_t *Len, uint8_t epnum)
+     UNUSED(Buf);
+     UNUSED(Len);
+     UNUSED(epnum);
++    // ===== OWN CODE =====
++    usb_cdc_tx_complete();
+   /* USER CODE END 13 */
+   return result;
+ }
+diff --git a/include/bno055_wrapper/bno055_wrapper.h b/include/bno055_wrapper/bno055_wrapper.h
+index f5f67ec..0c31312 100644
+--- a/include/bno055_wrapper/bno055_wrapper.h
++++ b/include/bno055_wrapper/bno055_wrapper.h
+@@ -2,27 +2,44 @@
+ #ifndef BNO055_WRAPPER_H
+ #define BNO055_WRAPPER_H
+ 
+-#include <stdint.h>
+-
+ #include "BNO055/bno055.h"
++#include "i2c_bus/i2c_bus.h"
+ 
+-s32 bno055_init_a(void);
+-
+-void struct_init(void);
+-
+-s32 bno055_read(struct bno055_accel_t *accel_out,
+-                struct bno055_gyro_t *gyro_out);
+-
+-s32 bno055_convert_double(struct bno055_accel_double_t *accel_out,
+-                          struct bno055_gyro_double_t *gyro_out);
+-
+-BNO055_RETURN_FUNCTION_TYPE bno055_read_euler(struct bno055_euler_t *euler);
+-
+-s32 bno055_stop(void);
++#include <stdbool.h>
++#include <stdint.h>
+ 
+-// Codigo HAL_I2C_ErrorCode (I2C_FLAG_AF/BERR/ARLO/OVR...) del ultimo fallo
+-// I2C, o 0xFFFFFFFF si el fallo fue un timeout de nuestro semaforo (ningun
+-// callback HAL llego a ejecutarse).
+-uint32_t bno055_last_i2c_error(void);
++// Escalas de los registros con las unidades por defecto (UNIT_SEL = 0)
++#define BNO055_GYRO_LSB_PER_DPS 16.0f
++#define BNO055_ACCEL_LSB_PER_MS2 100.0f
++
++typedef struct {
++    i2c_bus_t *bus;
++    uint8_t addr; // BNO055_I2C_ADDR1 (0x28) o BNO055_I2C_ADDR2 (0x29)
++    const char *name;
++
++    struct bno055_t drv;
++    bool ready;
++} bno055_dev_t;
++
++// Una lectura en rafaga (registros 0x14..0x35), en LSB crudos.
++typedef struct {
++    int16_t gyro[3]; // 16 LSB = 1 dps
++    int16_t quat[4]; // w, x, y, z. 2^14 LSB = 1
++    int16_t lia[3];  // aceleracion lineal (sin gravedad), 100 LSB = 1 m/s2
++    int16_t grav[3]; // vector gravedad, 100 LSB = 1 m/s2
++    int8_t temp;     // grados C
++    uint8_t calib;   // CALIB_STAT: sys<7:6> gyr<5:4> acc<3:2> mag<1:0>
++} bno055_sample_t;
++
++// Espera hasta por_timeout_ms a que el sensor responda (el POR tarda 650 ms
++// segun el datasheet), lo configura y lo deja en IMU_OPERATION_MODE. Con
++// timeout 0 solo prueba una vez, para reintentos sin bloquear al resto.
++// Usa el driver de Bosch, que tiene estado global: llamar solo desde una
++// task y nunca en paralelo con otra inicializacion.
++#define BNO055_POR_TIMEOUT_MS 1000U
++s8 bno055_dev_init(bno055_dev_t *dev, uint32_t por_timeout_ms);
++
++// Lee todo lo que necesitamos en una sola transaccion I2C.
++s8 bno055_dev_read(bno055_dev_t *dev, bno055_sample_t *out);
+ 
+ #endif
+diff --git a/include/read_adc/read_adc.h b/include/read_adc/read_adc.h
+index 6fec0e4..ac5cb86 100644
+--- a/include/read_adc/read_adc.h
++++ b/include/read_adc/read_adc.h
+@@ -1,12 +1,15 @@
+ #ifndef READ_ADC_H
+ #define READ_ADC_H
+ 
++#include "app_config.h"
++
+ #include <stdint.h>
+ 
+-void adc_init();
+-uint32_t read_data_adc();
+-uint32_t *read_data_adc_nvic();
++// Arranca ADC1 en modo continuo + DMA circular sobre un buffer de
++// ADC_OVERSAMPLE secuencias. 0 si OK.
++int adc_init(void);
+ 
+-extern uint16_t ADC_VAL[4];
++// Media de las ultimas ADC_OVERSAMPLE muestras de cada canal (12 bits).
++void adc_read(uint16_t out[ADC_CHANNELS]);
+ 
+-#endif // READ_ADC_H
+\ No newline at end of file
++#endif // READ_ADC_H
+diff --git a/include/send_info/send_info.h b/include/send_info/send_info.h
+index 4e56a27..1a0960d 100644
+--- a/include/send_info/send_info.h
++++ b/include/send_info/send_info.h
+@@ -1,11 +1,26 @@
+ #ifndef __SEND_INFO_H__
+ #define __SEND_INFO_H__
+ 
++#include <stdint.h>
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
+-void send_info(char *message);
++// Crear mutex/semaforo. Llamar tras osKernelInitialize().
++int usb_tx_init(void);
++
++// Copia data a un buffer propio y lo envia por USB CDC. Se puede llamar desde
++// varias tasks. Espera como mucho timeout_ms a que termine el envio anterior.
++// 0 si se encolo, -1 si el USB no esta configurado, esta ocupado o len es
++// demasiado grande.
++int usb_send(const char *data, uint16_t len, uint32_t timeout_ms);
++
++// Mensaje de texto corto (logs). Si el USB esta ocupado se descarta.
++void send_info(const char *message);
++
++// Llamadas desde usbd_cdc_if.c (contexto de ISR del OTG_FS).
++void usb_cdc_tx_complete(void);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/include/utils/utils.h b/include/utils/utils.h
+index 9131a00..9a54de3 100644
+--- a/include/utils/utils.h
++++ b/include/utils/utils.h
+@@ -1,11 +1,18 @@
+ #ifndef __UTILS_H__
+ #define __UTILS_H__
+ 
++#include <stdint.h>
++
+ #ifdef __cplusplus
+ extern "C" {
+ #endif
+ 
+-unsigned int sleep(unsigned int seconds);
++// Arranca el contador de ciclos DWT. Llamar una vez antes de delay_us().
++void utils_init(void);
++
++// Espera activa en microsegundos. Solo para esperas muy cortas (bit-bang),
++// para todo lo demas usar osDelay().
++void delay_us(uint32_t us);
+ 
+ #ifdef __cplusplus
+ }
+diff --git a/src/bno055_wrapper/bno055_wrapper.c b/src/bno055_wrapper/bno055_wrapper.c
+index 970aaf9..d11e35a 100644
+--- a/src/bno055_wrapper/bno055_wrapper.c
++++ b/src/bno055_wrapper/bno055_wrapper.c
+@@ -1,229 +1,107 @@
+ #include "bno055_wrapper/bno055_wrapper.h"
+-#include "BNO055/bno055.h"
++
++#include "app_config.h"
+ #include "cmsis_os.h"
+-#include "i2c.h"
+ 
+-/*----------------------------------------------------------------------------*
+- *  struct bno055_t parameters can be accessed by using BNO055
+- *  BNO055_t having the following parameters
+- *  Bus write function pointer: BNO055_WR_FUNC_PTR
+- *  Bus read function pointer: BNO055_RD_FUNC_PTR
+- *  Burst read function pointer: BNO055_BRD_FUNC_PTR
+- *  Delay function pointer: delay_msec
+- *  I2C address: dev_addr
+- *  Chip id of the sensor: chip_id
+- *---------------------------------------------------------------------------*/
+-static struct bno055_t bno055;
+-static u8 power_mode = BNO055_INIT_VALUE;
++#define BNO055_CHIP_ID_VALUE 0xA0U
++#define BNO055_POR_POLL_MS 20U
++
++#define BURST_FIRST BNO055_GYRO_DATA_X_LSB_ADDR // 0x14
++#define BURST_LAST BNO055_CALIB_STAT_ADDR       // 0x35
++#define BURST_LEN (BURST_LAST - BURST_FIRST + 1)
+ 
+ /*----------------------------------------------------------------------------*
+- *  Sincronizacion I2C1 en DMA.
+- *  El driver de Bosch espera que bus_read/bus_write vuelvan con los datos ya
+- *  transferidos, asi que lanzamos el DMA y dormimos la task hasta que el
+- *  callback suelte el semaforo.
++ *  El driver de Bosch guarda el dispositivo activo en un puntero global
++ *  (p_bno055) y sus callbacks de bus no reciben contexto. Solo se usa durante
++ *  la inicializacion, asi que basta con apuntar al bus del sensor que se esta
++ *  configurando.
+  *---------------------------------------------------------------------------*/
+-static osSemaphoreId_t i2c_done = NULL;
+-static volatile HAL_StatusTypeDef i2c_result = HAL_OK;
+-static volatile uint32_t last_i2c_error = 0;
+-
+-static struct bno055_accel_t accel_init;
+-static struct bno055_gyro_t gyro_init;
+-static struct bno055_euler_t euler_init;
+-
+-static inline float wrap_angle(float diff) {
+-    while (diff > 180.0f)
+-        diff -= 360.0f;
+-    while (diff < -180.0f)
+-        diff += 360.0f;
+-    return diff;
+-}
+-
+-uint32_t bno055_last_i2c_error(void) { return last_i2c_error; }
+-
+-static s8 BNO055_I2C_bus_write(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
+-    while (osSemaphoreAcquire(i2c_done, 0) == osOK) {
+-    }
+-    i2c_result = HAL_BUSY;
++static i2c_bus_t *drv_bus;
+ 
+-    if (HAL_I2C_Mem_Write_DMA(&hi2c1, (uint16_t)(dev_addr << 1), reg_addr,
+-                              I2C_MEMADD_SIZE_8BIT, reg_data, len) != HAL_OK) {
+-        return BNO055_ERROR;
+-    }
+-
+-    if (osSemaphoreAcquire(i2c_done, osWaitForever) != osOK) {
+-        last_i2c_error = 0xFFFFFFFFU;
+-        HAL_I2C_Master_Abort_IT(&hi2c1, (uint16_t)(dev_addr << 1));
+-        osSemaphoreAcquire(i2c_done, 5);
+-        return BNO055_ERROR;
+-    }
+-
+-    return (i2c_result == HAL_OK) ? BNO055_SUCCESS : BNO055_ERROR;
++static s8 drv_bus_write(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
++    return (i2c_bus_write(drv_bus, dev_addr, reg_addr, reg_data, len) == 0)
++               ? BNO055_SUCCESS
++               : BNO055_ERROR;
+ }
+ 
+-static s8 BNO055_I2C_bus_read(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
+-    while (osSemaphoreAcquire(i2c_done, 0) == osOK) {
+-    }
+-    i2c_result = HAL_BUSY;
+-
+-    if (HAL_I2C_Mem_Read_DMA(&hi2c1, (uint16_t)(dev_addr << 1), reg_addr,
+-                             I2C_MEMADD_SIZE_8BIT, reg_data, len) != HAL_OK) {
+-        return BNO055_ERROR;
+-    }
+-
+-    if (osSemaphoreAcquire(i2c_done, osWaitForever) != osOK) {
+-        last_i2c_error = 0xFFFFFFFFU;
+-        HAL_I2C_Master_Abort_IT(&hi2c1, (uint16_t)(dev_addr << 1));
+-        osSemaphoreAcquire(i2c_done, 5);
+-        return BNO055_ERROR;
+-    }
+-
+-    return (i2c_result == HAL_OK) ? BNO055_SUCCESS : BNO055_ERROR;
++static s8 drv_bus_read(u8 dev_addr, u8 reg_addr, u8 *reg_data, u8 len) {
++    return (i2c_bus_read(drv_bus, dev_addr, reg_addr, reg_data, len) == 0)
++               ? BNO055_SUCCESS
++               : BNO055_ERROR;
+ }
+ 
+ /* osDelay en lugar de HAL_Delay: HAL_Delay es busy-wait y no cede la CPU.
+- * El init del BNO055 mete esperas de 30-650 ms segun el modo. */
+-static void BNO055_delay_msec(u32 msec) { osDelay(msec); }
+-
+-/*----------------------------------------------------------------------------*
+- *  Callbacks HAL. Se ejecutan en contexto de ISR (I2C1_EV / I2C1_ER / DMA1).
+- *  osSemaphoreRelease detecta el IPSR y llama sola a la variante FromISR,
+- *  por eso esas IRQ deben estar en prioridad NVIC >= 5.
+- *---------------------------------------------------------------------------*/
+-void HAL_I2C_MemRxCpltCallback(I2C_HandleTypeDef *hi2c) {
+-    if (hi2c->Instance == I2C1) {
+-        i2c_result = HAL_OK;
+-        osSemaphoreRelease(i2c_done);
++ * El driver mete esperas de 7-19 ms en cada cambio de modo. */
++static void drv_delay_msec(u32 msec) { osDelay(msec); }
++
++static bool wait_por(bno055_dev_t *dev, uint32_t timeout_ms) {
++    for (uint32_t t = 0;; t += BNO055_POR_POLL_MS) {
++        uint8_t id = 0;
++        if (i2c_bus_read(dev->bus, dev->addr, BNO055_CHIP_ID_ADDR, &id, 1) ==
++                0 &&
++            id == BNO055_CHIP_ID_VALUE) {
++            return true;
++        }
++        if (t >= timeout_ms) {
++            return false;
++        }
++        osDelay(BNO055_POR_POLL_MS);
+     }
+ }
+ 
+-void HAL_I2C_MemTxCpltCallback(I2C_HandleTypeDef *hi2c) {
+-    if (hi2c->Instance == I2C1) {
+-        i2c_result = HAL_OK;
+-        osSemaphoreRelease(i2c_done);
+-    }
+-}
++s8 bno055_dev_init(bno055_dev_t *dev, uint32_t por_timeout_ms) {
++    dev->ready = false;
+ 
+-void HAL_I2C_ErrorCallback(I2C_HandleTypeDef *hi2c) {
+-    if (hi2c->Instance == I2C1) {
+-        i2c_result = HAL_ERROR;
+-        last_i2c_error = hi2c->ErrorCode;
+-        osSemaphoreRelease(i2c_done);
++    if (!wait_por(dev, por_timeout_ms)) {
++        return BNO055_ERROR;
+     }
+-}
+ 
+-void HAL_I2C_AbortCpltCallback(I2C_HandleTypeDef *hi2c) {
+-    if (hi2c->Instance == I2C1) {
+-        i2c_result = HAL_ERROR;
+-        last_i2c_error = hi2c->ErrorCode;
+-        osSemaphoreRelease(i2c_done);
+-    }
++    drv_bus = dev->bus;
++    dev->drv.bus_write = drv_bus_write;
++    dev->drv.bus_read = drv_bus_read;
++    dev->drv.delay_msec = drv_delay_msec;
++    dev->drv.dev_addr = dev->addr;
++
++    s32 comres = bno055_init(&dev->drv);
++
++    // Si el micro se reseteo sin cortar alimentacion, el sensor sigue en el
++    // modo de fusion anterior. CLK_SEL solo se puede escribir en CONFIG.
++    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_CONFIG);
++#if IMU_USE_EXT_CRYSTAL
++    comres += bno055_set_clk_src(BNO055_BIT_ENABLE);
++    osDelay(10);
++#endif
++    comres += bno055_set_power_mode(BNO055_POWER_MODE_NORMAL);
++    comres += bno055_set_operation_mode(IMU_OPERATION_MODE);
++
++    dev->ready = (comres == BNO055_SUCCESS);
++    return dev->ready ? BNO055_SUCCESS : BNO055_ERROR;
+ }
+ 
+-// Lectura cruda, sin restar nada — la usa struct_init() y bno055_read()
+-static s32 bno055_read_raw(struct bno055_accel_t *accel_out,
+-                           struct bno055_gyro_t *gyro_out) {
+-    s32 comres = BNO055_SUCCESS;
+-    comres += bno055_read_accel_xyz(accel_out);
+-    comres += bno055_read_gyro_xyz(gyro_out);
+-    return comres;
++static inline int16_t le16(const uint8_t *b, uint8_t reg) {
++    const uint8_t i = reg - BURST_FIRST;
++    return (int16_t)((uint16_t)b[i] | ((uint16_t)b[i + 1] << 8));
+ }
+ 
+-void struct_init(void) {
+-    if (bno055_read_raw(&accel_init, &gyro_init) != BNO055_SUCCESS) {
+-        accel_init.x = accel_init.y = accel_init.z = 0;
+-        gyro_init.x = gyro_init.y = gyro_init.z = 0;
+-    }
++s8 bno055_dev_read(bno055_dev_t *dev, bno055_sample_t *out) {
++    uint8_t b[BURST_LEN];
+ 
+-    if (bno055_read_euler_hrp(&euler_init) != BNO055_SUCCESS) {
+-        euler_init.h = euler_init.p = euler_init.r = 0;
++    // Tras bno055_dev_init() el sensor queda en la pagina 0, que es donde
++    // estan todos estos registros.
++    if (i2c_bus_read(dev->bus, dev->addr, BURST_FIRST, b, sizeof(b)) != 0) {
++        return BNO055_ERROR;
+     }
+-}
+ 
+-s32 bno055_init_a(void) {
+-    s32 comres = BNO055_ERROR;
+-
+-    // Antes de cualquier acceso al bus: bno055_init() ya hace lecturas
+-    if (i2c_done == NULL) {
+-        i2c_done = osSemaphoreNew(1, 0, NULL);
+-        if (i2c_done == NULL) {
+-            return BNO055_ERROR;
+-        }
++    for (uint8_t i = 0; i < 3; i++) {
++        out->gyro[i] = le16(b, BNO055_GYRO_DATA_X_LSB_ADDR + 2 * i);
++        out->lia[i] = le16(b, BNO055_LINEAR_ACCEL_DATA_X_LSB_ADDR + 2 * i);
++        out->grav[i] = le16(b, BNO055_GRAVITY_DATA_X_LSB_ADDR + 2 * i);
+     }
++    for (uint8_t i = 0; i < 4; i++) {
++        out->quat[i] = le16(b, BNO055_QUATERNION_DATA_W_LSB_ADDR + 2 * i);
++    }
++    out->temp = (int8_t)b[BNO055_TEMP_ADDR - BURST_FIRST];
++    out->calib = b[BNO055_CALIB_STAT_ADDR - BURST_FIRST];
+ 
+-    bno055.bus_write = BNO055_I2C_bus_write;
+-    bno055.bus_read = BNO055_I2C_bus_read;
+-    bno055.delay_msec = BNO055_delay_msec;
+-    bno055.dev_addr = BNO055_I2C_ADDR1;
+-
+-    comres = bno055_init(&bno055);
+-
+-    power_mode = BNO055_POWER_MODE_NORMAL;
+-    comres += bno055_set_power_mode(power_mode);
+-
+-    // Inertial measurement unit.
+-    // Reads accel,gyro and fusion data
+-    comres += bno055_set_operation_mode(BNO055_OPERATION_MODE_IMUPLUS);
+-    comres += bno055_set_euler_unit(BNO055_EULER_UNIT_DEG);
+-
+-    return comres;
+-}
+-
+-s32 bno055_read(struct bno055_accel_t *accel_out,
+-                struct bno055_gyro_t *gyro_out) {
+-    s32 comres = BNO055_SUCCESS;
+-
+-    /*  Raw accel X, Y and Z data can read from the register
+-     * page - page 0
+-     * register - 0x08 to 0x0D*/
+-    comres += bno055_read_accel_xyz(accel_out);
+-
+-    /*  Raw gyro X, Y and Z data can read from the register
+-     * page - page 0
+-     * register - 0x14 to 0x19*/
+-    comres += bno055_read_gyro_xyz(gyro_out);
+-
+-    gyro_out->x = gyro_out->x - gyro_init.x;
+-    gyro_out->y = gyro_out->y - gyro_init.y;
+-    gyro_out->z = gyro_out->z - gyro_init.z;
+-
+-    accel_out->x = accel_out->x - accel_init.x;
+-    accel_out->y = accel_out->y - accel_init.y;
+-    accel_out->z = accel_out->z - accel_init.z;
+-
+-    return comres;
+-}
+-
+-s32 bno055_convert_double(struct bno055_accel_double_t *accel_out,
+-                          struct bno055_gyro_double_t *gyro_out) {
+-    s32 comres = BNO055_SUCCESS;
+-
+-    /*  API used to read accel data output as double  - m/s2 and mg
+-     * float functions also available in the BNO055 API */
+-    comres += bno055_convert_double_accel_xyz_msq(accel_out);
+-
+-    /*  API used to read gyro data output as double  - dps and rps
+-     * float functions also available in the BNO055 API */
+-    comres += bno055_convert_double_gyro_xyz_dps(gyro_out);
+-
+-    return comres;
+-}
+-
+-BNO055_RETURN_FUNCTION_TYPE bno055_read_euler(struct bno055_euler_t *euler) {
+-    BNO055_RETURN_FUNCTION_TYPE comres = BNO055_SUCCESS;
+-    comres += bno055_read_euler_hrp(euler);
+-
+-    euler->h = wrap_angle(euler->h - euler_init.h);
+-    euler->r = wrap_angle(euler->r - euler_init.r);
+-    euler->p = euler->p - euler_init.p;
+-
+-    return comres;
++    return BNO055_SUCCESS;
+ }
+-
+-s32 bno055_stop(void) {
+-    s32 comres = BNO055_SUCCESS;
+-
+-    power_mode = BNO055_POWER_MODE_SUSPEND;
+-    comres += bno055_set_power_mode(power_mode);
+-
+-    return comres;
+-}
+\ No newline at end of file
+diff --git a/src/free_rtos/free_rtos.c b/src/free_rtos/free_rtos.c
+index 9df6e3a..44eba5b 100644
+--- a/src/free_rtos/free_rtos.c
++++ b/src/free_rtos/free_rtos.c
+@@ -1,135 +1,170 @@
++#include "free_rtos/free_rtos.h"
++
+ #include "FreeRTOS.h"
+-#include "adc.h"
+-#include "bno055_wrapper/bno055_wrapper.h"
++#include "app_config.h"
+ #include "cmsis_os.h"
+-#include "cmsis_os2.h"
++#include "imu/imu.h"
+ #include "read_adc/read_adc.h"
+ #include "send_info/send_info.h"
+ #include "task.h"
+ 
++#include <math.h>
++#include <stdarg.h>
++#include <stdbool.h>
+ #include <stdint.h>
+ #include <stdio.h>
+-#include <string.h>
+-
+-#define N_DMA_CH 1U
+-#define I_DMA_CH 0U
++#include <stdlib.h>
+ 
+-osSemaphoreId_t adc_sem;
++#define TX_MSG_SIZE 1024U
++#define TX_TIMEOUT_MS 5U
+ 
+-/* Definitions for readADC */
+-osThreadId_t readADCHandle;
+-const osThreadAttr_t readADC_attributes = {
+-    .name = "readADC",
+-    .stack_size = 128 * 4,
+-    .priority = (osPriority_t)osPriorityBelowNormal,
+-};
+-/* Definitions for readI2C1 */
+-osThreadId_t readI2C1Handle;
+-const osThreadAttr_t readI2C1_attributes = {
+-    .name = "readI2C1",
+-    .stack_size = 128 * 4,
+-    .priority = (osPriority_t)osPriorityNormal,
+-};
+-/* Definitions for readI2C2 */
+-osThreadId_t readI2C2Handle;
+-const osThreadAttr_t readI2C2_attributes = {
+-    .name = "readI2C2",
+-    .stack_size = 128 * 4,
+-    .priority = (osPriority_t)osPriorityNormal,
+-};
+-/* Definitions for pushSerial */
+-osThreadId_t pushSerialHandle;
+-const osThreadAttr_t pushSerial_attributes = {
++/* snprintf de newlib gasta bastante pila: no bajar de 2 KB en la task que
++ * formatea. Vigilar con uxTaskGetStackHighWaterMark(). */
++static osThreadId_t tx_thread;
++static const osThreadAttr_t tx_attr = {
+     .name = "pushSerial",
+-    .stack_size = 128 * 4,
+-    .priority = (osPriority_t)osPriorityLow,
++    .stack_size = 2048,
++    .priority = (osPriority_t)osPriorityBelowNormal,
+ };
+ 
+-// ============ Struct ============
+-struct message {
+-    uint16_t adc_value[4];
+-    struct bno055_accel_t accel_out;
+-    struct bno055_gyro_t gyro_out;
+-    struct bno055_euler_t euler;
+-};
++// ============ Formateo JSON ============
++// nano.specs no trae printf con float: los decimales se escriben a mano.
+ 
+-struct message msg_raw;
++typedef struct {
++    char *buf;
++    size_t cap;
++    size_t len;
++} sbuf_t;
+ 
+-static void StartReadADC(void *argument) {
+-    // PA1
+-    adc_init();
+-    for (;;) {
+-        memcpy(msg_raw.adc_value, ADC_VAL, sizeof(ADC_VAL));
+-        osDelay(100);
++static void sb_printf(sbuf_t *sb, const char *fmt, ...) {
++    if (sb->len >= sb->cap) {
++        return;
++    }
++    va_list ap;
++    va_start(ap, fmt);
++    int n = vsnprintf(sb->buf + sb->len, sb->cap - sb->len, fmt, ap);
++    va_end(ap);
++    if (n > 0) {
++        sb->len += (size_t)n;
+     }
+ }
+ 
+-static void StartReadI2C1(void *argument) {
+-    // SDA=azul=PB7 SCL=amarillo=PB6
++// Numero con 2 decimales
++static void sb_fixed2(sbuf_t *sb, float v) {
++    long c = lroundf(v * 100.0f);
++    sb_printf(sb, "%s%ld.%02ld", (c < 0) ? "-" : "", labs(c) / 100,
++              labs(c) % 100);
++}
++
++static void sb_vec3(sbuf_t *sb, float a, float b, float c) {
++    sb_printf(sb, "[");
++    sb_fixed2(sb, a);
++    sb_printf(sb, ",");
++    sb_fixed2(sb, b);
++    sb_printf(sb, ",");
++    sb_fixed2(sb, c);
++    sb_printf(sb, "]");
++}
++
++static void sb_raw3(sbuf_t *sb, const int16_t v[3], float lsb_per_unit) {
++    sb_vec3(sb, v[0] / lsb_per_unit, v[1] / lsb_per_unit, v[2] / lsb_per_unit);
++}
+ 
+-    while (bno055_init_a() != BNO055_SUCCESS) {
+-        send_info("Error init BNO055");
+-        osDelay(500);
++/* Formato de cada linea:
++ * {"t":ms,"adc":[a0,a1,a2,a3],
++ *  "imu":{"wrist":{"cal":[sys,gyr,acc,mag],"rpy":[r,p,y],"gyr":[x,y,z],
++ *                  "lia":[x,y,z]} | null, ...},
++ *  "joint":{"wrist_elbow":[r,p,y] | null, "elbow_shoulder":...}}
++ * rpy en grados (Euler ZYX), gyr en dps, lia en m/s2. */
++static size_t format_frame(char *buf, size_t cap, const imu_frame_t *f,
++                           bool have_imu, const uint16_t adc[ADC_CHANNELS]) {
++    sbuf_t sb = {buf, cap, 0};
++
++    sb_printf(&sb, "{\"t\":%lu,\"adc\":[", (unsigned long)f->tick);
++    for (uint32_t i = 0; i < ADC_CHANNELS; i++) {
++        sb_printf(&sb, "%s%u", i ? "," : "", (unsigned)adc[i]);
+     }
+-    struct_init();
+-    s32 err;
+-    s8 err2;
+-    for (;;) {
+-        err = bno055_read(&msg_raw.accel_out, &msg_raw.gyro_out);
+-        // err2 = bno055_read_euler(&msg_raw.euler);
+-        if (err != BNO055_SUCCESS) {
+-            char err_msg[48];
+-            snprintf(err_msg, sizeof(err_msg), "Error in I2C1: 0x%08lX\r\n",
+-                     (unsigned long)bno055_last_i2c_error());
+-            send_info(err_msg);
+-            // osThreadExit();
++
++    sb_printf(&sb, "],\"imu\":{");
++    for (int i = 0; i < IMU_COUNT; i++) {
++        const imu_reading_t *r = &f->imu[i];
++        sb_printf(&sb, "%s\"%s\":", i ? "," : "", imu_name(i));
++        if (!have_imu || !r->ok) {
++            sb_printf(&sb, "null");
++            continue;
+         }
+-        osDelay(50);
++        const uint8_t c = r->raw.calib;
++        sb_printf(&sb, "{\"cal\":[%u,%u,%u,%u],\"rpy\":", (c >> 6) & 3U,
++                  (c >> 4) & 3U, (c >> 2) & 3U, c & 3U);
++        sb_vec3(&sb, r->euler.roll, r->euler.pitch, r->euler.yaw);
++        sb_printf(&sb, ",\"gyr\":");
++        sb_raw3(&sb, r->raw.gyro, BNO055_GYRO_LSB_PER_DPS);
++        sb_printf(&sb, ",\"lia\":");
++        sb_raw3(&sb, r->raw.lia, BNO055_ACCEL_LSB_PER_MS2);
++        sb_printf(&sb, "}");
+     }
+-}
+ 
+-static void StartReadI2C2(void *argument) {
+-    for (;;) {
+-        // HAL_I2C_Master_Receive(&hi2c2, dev_addr, buf, len, HAL_MAX_DELAY);
+-        // todo
+-        osDelay(50);
++    sb_printf(&sb, "},\"joint\":{");
++    for (int j = 0; j < JOINT_COUNT; j++) {
++        const joint_reading_t *jr = &f->joint[j];
++        sb_printf(&sb, "%s\"%s\":", j ? "," : "", joint_name(j));
++        if (!have_imu || !jr->ok) {
++            sb_printf(&sb, "null");
++            continue;
++        }
++        sb_vec3(&sb, jr->rpy.roll, jr->rpy.pitch, jr->rpy.yaw);
+     }
++    sb_printf(&sb, "}}\r\n");
++
++    // Si no cabe, mejor no mandar nada que mandar JSON cortado
++    return (sb.len < sb.cap) ? sb.len : 0;
+ }
+ 
+-static void StartPushSerial(void *argument) {
+-    char msg[128];
++static void tx_task(void *argument) {
++    (void)argument;
++    static char msg[TX_MSG_SIZE];
++    imu_frame_t frame;
++    uint16_t adc[ADC_CHANNELS];
++
++    if (adc_init() != 0) {
++        send_info("{\"log\":\"adc init failed\"}\r\n");
++    }
++
++    TickType_t wake = xTaskGetTickCount();
+     for (;;) {
+-        snprintf(msg, sizeof(msg),
+-                 "{\"adc\":%lu,%lu,%lu,%lu"
+-                 "\"euler\":{\"h\":%d, \"p\":%d, \"r\":%d},"
+-                 "\"accel\":{\"x\":%d,\"y\":%d,\"z\":%d},"
+-                 "\"gyro\":{\"x\":%d,\"y\":%d,\"z\":%d}}\r\n",
+-                 msg_raw.adc_value[0], msg_raw.adc_value[1],
+-                 msg_raw.adc_value[2], msg_raw.adc_value[3], msg_raw.euler.h,
+-                 msg_raw.euler.p, msg_raw.euler.r, msg_raw.accel_out.x,
+-                 msg_raw.accel_out.y, msg_raw.accel_out.z, msg_raw.gyro_out.x,
+-                 msg_raw.gyro_out.y, msg_raw.gyro_out.z);
+-
+-        send_info(msg);
+-
+-        osDelay(1000);
++        vTaskDelayUntil(&wake, pdMS_TO_TICKS(TX_PERIOD_MS));
++
++        bool have_imu = imu_get_latest(&frame);
++        if (!have_imu) {
++            frame = (imu_frame_t){.tick = osKernelGetTickCount()};
++        }
++        adc_read(adc);
++
++        size_t len = format_frame(msg, sizeof(msg), &frame, have_imu, adc);
++        if (len > 0) {
++            usb_send(msg, (uint16_t)len, TX_TIMEOUT_MS);
++        }
+     }
+ }
+ 
+-static void thread_create(void) {
+-    /* Create the thread(s) */
+-    /* creation of readADC */
+-    readADCHandle = osThreadNew(StartReadADC, NULL, &readADC_attributes);
++// ============ Hooks de FreeRTOS ============
++// Para con el depurador: pcTaskName dice que task se quedo sin pila.
+ 
+-    /* creation of readI2C1 */
+-    readI2C1Handle = osThreadNew(StartReadI2C1, NULL, &readI2C1_attributes);
++volatile const char *rtos_fault_task;
+ 
+-    /* creation of readI2C2 */
+-    readI2C2Handle = osThreadNew(StartReadI2C2, NULL, &readI2C2_attributes);
++void vApplicationStackOverflowHook(TaskHandle_t xTask, char *pcTaskName) {
++    (void)xTask;
++    rtos_fault_task = pcTaskName;
++    taskDISABLE_INTERRUPTS();
++    for (;;) {
++    }
++}
+ 
+-    /* creation of pushSerial */
+-    pushSerialHandle =
+-        osThreadNew(StartPushSerial, NULL, &pushSerial_attributes);
++void vApplicationMallocFailedHook(void) {
++    rtos_fault_task = "malloc";
++    taskDISABLE_INTERRUPTS();
++    for (;;) {
++    }
+ }
+ 
+ /**
+@@ -138,21 +173,15 @@ static void thread_create(void) {
+  * @retval None
+  */
+ void freertos_init(void) {
+-    /* add mutexes, ... */
+-
+-    /* start timers, add new ones, ... */
+-    /* add queues, ... */
+-
+     /* Init scheduler */
+     osKernelInitialize(); /* Call init function for freertos objects (in
+                              cmsis_os2.c) */
+ 
+-    /* add semaphores, ... */
+-    // adc_sem = osSemaphoreNew(N_DMA_CH, I_DMA_CH, NULL);
+-
+-    /* Init thread */
+-    thread_create();
++    int err = usb_tx_init();
++    err |= imu_start();
++    tx_thread = osThreadNew(tx_task, NULL, &tx_attr);
++    configASSERT(err == 0 && tx_thread != NULL);
+ 
+     /* Start scheduler */
+     osKernelStart();
+-}
+\ No newline at end of file
++}
