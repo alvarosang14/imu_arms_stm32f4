@@ -50,6 +50,9 @@ target_sources(${CMAKE_PROJECT_NAME} PRIVATE
     ${CMAKE_SOURCE_DIR}/src/bno055_wrapper/bno055_wrapper.c
     ${CMAKE_SOURCE_DIR}/src/read_adc/read_adc.c
     ${CMAKE_SOURCE_DIR}/src/free_rtos/free_rtos.c
+    ${CMAKE_SOURCE_DIR}/src/i2c_bus/i2c_bus.c
+    ${CMAKE_SOURCE_DIR}/src/imu/imu.c
+    ${CMAKE_SOURCE_DIR}/src/orientation/orientation.c
     ${CMAKE_SOURCE_DIR}/submodule/BNO055/bno055.c
     # Add user sources here
 )
